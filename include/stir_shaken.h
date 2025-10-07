@@ -34,6 +34,15 @@ extern "C" {
 #include <openssl/err.h>
 #include <openssl/bio.h>
 #include <openssl/conf_api.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#include <openssl/core_names.h>
+#include <openssl/param_build.h>
+#include <openssl/opensslv.h>
+#include <openssl/core_names.h>
+#include <openssl/params.h>
+#include <openssl/evp.h>
+#include <openssl/bn.h>
+#endif
 #include <libgen.h>
 
 #define stir_shaken_min(x, y) ((x) < (y)? (x) : (y))
@@ -737,6 +746,14 @@ typedef enum stir_shaken_error {
 	STIR_SHAKEN_ERROR_VS_MEM,
 	STIR_SHAKEN_ERROR_UNKNOWN_1,
 	STIR_SHAKEN_ERROR_UNKNOWN_2,
+	STIR_SHAKEN_ERROR_SSL_KEYGEN_CTX,
+	STIR_SHAKEN_ERROR_SSL_KEYGEN_INIT,
+	STIR_SHAKEN_ERROR_SSL_SET_CURVE,
+	STIR_SHAKEN_ERROR_SSL_EVP_PKEY_ALLOC,
+	STIR_SHAKEN_ERROR_SSL_EVP_PKEY_SET1,
+	STIR_SHAKEN_ERROR_SSL_EVP_PKEY_GET_PARAM,
+	STIR_SHAKEN_ERROR_MEMORY,
+	STIR_SHAKEN_ERROR_BASE64
 } stir_shaken_error_t;
 
 #define STIR_SHAKEN_HTTP_REQ_404_INVALID "404"

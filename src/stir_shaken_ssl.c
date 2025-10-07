@@ -2322,7 +2322,11 @@ fail:
 
 stir_shaken_status_t stir_shaken_generate_keys(stir_shaken_context_t *ss, EC_KEY **eck, EVP_PKEY **priv, EVP_PKEY **pub, const char *private_key_full_name, const char *public_key_full_name, unsigned char *priv_raw, uint32_t *priv_raw_len)
 {
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
     EC_KEY *ec_key = NULL;
+#else
+    EVP_PKEY_CTX *pctx = NULL;
+#endif
     EVP_PKEY *pk = NULL;
     BIO *bio = NULL;
     char err_buf[STIR_SHAKEN_ERROR_BUF_LEN] = { 0 };
@@ -2359,6 +2363,7 @@ stir_shaken_status_t stir_shaken_generate_keys(stir_shaken_context_t *ss, EC_KEY
     stir_shaken_file_remove(private_key_full_name);
     stir_shaken_file_remove(public_key_full_name);
 
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
     /* Generate EC key associated with our chosen curve. */
     ec_key = EC_KEY_new_by_curve_name(stir_shaken_globals.curve_nid);
     if (!ec_key) {
@@ -2420,6 +2425,52 @@ stir_shaken_status_t stir_shaken_generate_keys(stir_shaken_context_t *ss, EC_KEY
             goto fail;
         }
     }
+#else // OpenSSL 3.0+
+    // Create key generation context
+    pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
+    if (!pctx) {
+        stir_shaken_set_error(ss, "Failed to create EVP_PKEY_CTX", STIR_SHAKEN_ERROR_SSL_KEYGEN_CTX);
+        goto fail;
+    }
+
+    if (EVP_PKEY_keygen_init(pctx) <= 0) {
+        stir_shaken_set_error(ss, "Failed to initialize keygen", STIR_SHAKEN_ERROR_SSL_KEYGEN_INIT);
+        goto fail;
+    }
+
+    if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx, stir_shaken_globals.curve_nid) <= 0) {
+        stir_shaken_set_error(ss, "Failed to set EC curve", STIR_SHAKEN_ERROR_SSL_SET_CURVE);
+        goto fail;
+    }
+
+    if (EVP_PKEY_keygen(pctx, &pk) <= 0) {
+        stir_shaken_set_error(ss, "Failed to generate EC key", STIR_SHAKEN_ERROR_SSL_EC_KEY_GENERATE);
+        goto fail;
+    }
+
+    EVP_PKEY_CTX_free(pctx);
+    pctx = NULL;
+
+    // Write private key
+    bio = BIO_new_file(private_key_full_name, "w");
+    if (!bio) {
+        stir_shaken_set_error(ss, "Cannot open private key file for writing", STIR_SHAKEN_ERROR_SSL_BIO_NEW_FILE_2);
+        goto fail;
+    }
+    PEM_write_bio_PrivateKey(bio, pk, NULL, NULL, 0, NULL, NULL);
+    BIO_free_all(bio);
+    bio = NULL;
+
+    // Write public key
+    bio = BIO_new_file(public_key_full_name, "w");
+    if (!bio) {
+        stir_shaken_set_error(ss, "Cannot open public key file for writing", STIR_SHAKEN_ERROR_SSL_BIO_NEW_FILE_3);
+        goto fail;
+    }
+    PEM_write_bio_PUBKEY(bio, pk);
+    BIO_free_all(bio);
+    bio = NULL;
+#endif
 
     pk = stir_shaken_load_pubkey_from_file(ss, public_key_full_name);
     if (!pk) {
@@ -2443,6 +2494,9 @@ stir_shaken_status_t stir_shaken_generate_keys(stir_shaken_context_t *ss, EC_KEY
 fail:
 
     if (bio) BIO_free_all(bio);
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    if (pctx) EVP_PKEY_CTX_free(pctx);
+#endif
 
     return STIR_SHAKEN_STATUS_FALSE;
 }
@@ -2450,7 +2504,9 @@ fail:
 void stir_shaken_destroy_keys_ex(EC_KEY **eck, EVP_PKEY **priv, EVP_PKEY **pub)
 {
     if (eck && *eck) {
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
         EC_KEY_free(*eck);
+#endif
         *eck = NULL;
     }
     if (priv && *priv) {
@@ -2461,10 +2517,12 @@ void stir_shaken_destroy_keys_ex(EC_KEY **eck, EVP_PKEY **priv, EVP_PKEY **pub)
         EVP_PKEY_free(*pub);
         *pub = NULL;
     }
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
     ERR_free_strings();
     EVP_cleanup();
     CRYPTO_cleanup_all_ex_data();
     ENGINE_cleanup();
+#endif
 }
 
 void stir_shaken_destroy_keys(stir_shaken_ssl_keys_t *keys)
@@ -2502,13 +2560,19 @@ stir_shaken_status_t stir_shaken_do_sign_data_with_digest(stir_shaken_context_t 
         goto err;
     }
 
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
     mdctx = EVP_MD_CTX_create();
+#else
+    mdctx = EVP_MD_CTX_new();
+#endif
     if (!mdctx) {
         stir_shaken_set_error(ss, "Cannot create md context", STIR_SHAKEN_ERROR_SSL_MDCTX_CREATE_1);
         goto err;
     }
 
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
     EVP_MD_CTX_init(mdctx);
+#endif
     i = EVP_DigestSignInit(mdctx, NULL, md, NULL, pkey);
     if (i == 0) {
         stir_shaken_set_error(ss, "Error in EVP_DigestSignInit", STIR_SHAKEN_ERROR_SSL_MDCTX_INIT_1);
@@ -2538,22 +2602,26 @@ stir_shaken_status_t stir_shaken_do_sign_data_with_digest(stir_shaken_context_t 
         stir_shaken_set_error(ss, "Error in EVP_DigestSignFinal", STIR_SHAKEN_ERROR_SSL_MDCTX_SIGN_2);
         goto err;
     }
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
     EVP_MD_CTX_destroy(mdctx);
+#else
+    EVP_MD_CTX_free(mdctx);
+#endif
     mdctx = NULL;
 
     if (tmpsig_len > 0) {
 
-        const EC_GROUP *group = NULL;
+        EC_GROUP *group = NULL;
         unsigned int degree = 0, bn_len = 0, r_len = 0, s_len = 0, buf_len = 0;
         unsigned char *raw_buf = NULL;
-        EC_KEY *ec_key = NULL;
         const BIGNUM *ec_sig_r = NULL;
         const BIGNUM *ec_sig_s = NULL;
 
         /* For EC we need to convert to a raw format of R/S. */
 
         /* Get the actual ec_key */
-        ec_key = EVP_PKEY_get1_EC_KEY(pkey);
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
+        EC_KEY *ec_key = EVP_PKEY_get1_EC_KEY(pkey);
         if (ec_key == NULL) {
             stir_shaken_set_error(ss, "Cannot get EC key from EVP key", STIR_SHAKEN_ERROR_SSL_GET_EC_KEY_1);
             goto err;
@@ -2568,6 +2636,30 @@ stir_shaken_status_t stir_shaken_do_sign_data_with_digest(stir_shaken_context_t 
         degree = EC_GROUP_get_degree(group);
 
         EC_KEY_free(ec_key);
+#else
+        // OpenSSL 3.x: Extract EC_GROUP degree via EVP_PKEY_get_params
+        OSSL_PARAM params[2];
+        int nid = 0;
+
+        // Retrieve group NID (curve name)
+        params[0] = OSSL_PARAM_construct_int(OSSL_PKEY_PARAM_GROUP_NAME, &nid);
+        params[1] = OSSL_PARAM_construct_end();
+
+        if (!EVP_PKEY_get_params(pkey, params)) {
+            stir_shaken_set_error(ss, "Cannot get EC group NID from EVP key", STIR_SHAKEN_ERROR_SSL_EC_KEY_GET_GROUP_1);
+            goto err;
+        }
+
+        // Create EC_GROUP from nid
+        group = EC_GROUP_new_by_curve_name(nid);
+        if (!group) {
+            stir_shaken_set_error(ss, "Cannot create EC_GROUP from nid", STIR_SHAKEN_ERROR_SSL_EC_KEY_GET_GROUP_1);
+            goto err;
+        }
+
+        degree = EC_GROUP_get_degree(group);
+        EC_GROUP_free(group);
+#endif
 
         /* Get the sig from the DER encoded version. */
         ec_sig = d2i_ECDSA_SIG(NULL, (const unsigned char **) &tmpsig, tmpsig_len);
@@ -2619,10 +2711,12 @@ stir_shaken_status_t stir_shaken_do_sign_data_with_digest(stir_shaken_context_t 
         ECDSA_SIG_free(ec_sig);
         ec_sig = NULL;
     }
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
     ERR_free_strings();
     EVP_cleanup();
     CRYPTO_cleanup_all_ex_data();
     ENGINE_cleanup();
+#endif
 
     return STIR_SHAKEN_STATUS_OK;
 
@@ -2632,13 +2726,19 @@ err:
         ec_sig = NULL;
     }
     if (mdctx) {
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
         EVP_MD_CTX_destroy(mdctx);
+#else
+        EVP_MD_CTX_free(mdctx);
+#endif
         mdctx = NULL;
     }
     ERR_free_strings();
     EVP_cleanup();
     CRYPTO_cleanup_all_ex_data();
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
     ENGINE_cleanup();
+#endif
     return STIR_SHAKEN_STATUS_FALSE;
 }
 
@@ -2671,10 +2771,9 @@ int stir_shaken_do_verify_data(stir_shaken_context_t *ss, const void *data, size
 
         BIGNUM *ec_sig_r = NULL;
         BIGNUM *ec_sig_s = NULL;
-		const EC_GROUP *group = NULL;
+		EC_GROUP *group = NULL;
         unsigned int degree = 0, bn_len = 0;
         unsigned char *p = NULL;
-        EC_KEY *ec_key = NULL;
 
         ec_sig = ECDSA_SIG_new();
         if (ec_sig == NULL) {
@@ -2682,8 +2781,9 @@ int stir_shaken_do_verify_data(stir_shaken_context_t *ss, const void *data, size
             goto err;
         }
 
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
         /* Get the actual ec_key */
-        ec_key = EVP_PKEY_get1_EC_KEY(public_key);
+        EC_KEY *ec_key = EVP_PKEY_get1_EC_KEY(public_key);
         if (ec_key == NULL) {
             stir_shaken_set_error(ss, "Cannot create EC key", STIR_SHAKEN_ERROR_SSL_GET_EC_KEY_2);
             goto err;
@@ -2698,6 +2798,27 @@ int stir_shaken_do_verify_data(stir_shaken_context_t *ss, const void *data, size
         degree = EC_GROUP_get_degree(group);
 
         EC_KEY_free(ec_key);
+#else
+        // OpenSSL 3.0+ extract group from EVP_PKEY using OSSL_PARAMs
+        int nid = 0;
+        OSSL_PARAM params[2];
+        params[0] = OSSL_PARAM_construct_int(OSSL_PKEY_PARAM_GROUP_NAME, &nid);
+        params[1] = OSSL_PARAM_construct_end();
+
+        if (!EVP_PKEY_get_params(public_key, params)) {
+            stir_shaken_set_error(ss, "Failed to get EC group nid", STIR_SHAKEN_ERROR_SSL_EC_KEY_GET_GROUP_2);
+            goto err;
+        }
+
+        group = EC_GROUP_new_by_curve_name(nid);
+        if (!group) {
+            stir_shaken_set_error(ss, "Failed to create EC group from nid", STIR_SHAKEN_ERROR_SSL_EC_KEY_GET_GROUP_2);
+            goto err;
+        }
+
+        degree = EC_GROUP_get_degree(group);
+        EC_GROUP_free(group);
+#endif
 
         bn_len = (degree + 7) / 8;
         if ((bn_len * 2) != siglen) {
@@ -2788,7 +2909,9 @@ int stir_shaken_do_verify_data(stir_shaken_context_t *ss, const void *data, size
     ERR_free_strings();
     EVP_cleanup();
     CRYPTO_cleanup_all_ex_data();
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
     ENGINE_cleanup();
+#endif
     return res;
 
 err:
@@ -2807,7 +2930,9 @@ err:
     ERR_free_strings();
     EVP_cleanup();
     CRYPTO_cleanup_all_ex_data();
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
     ENGINE_cleanup();
+#endif
     return -1;
 }
 
@@ -2958,19 +3083,176 @@ stir_shaken_status_t stir_shaken_get_pubkey_raw_from_cert(stir_shaken_context_t 
     return ret;
 }
 
+// Encodes input bytes to base64url string (null-terminated).
+// Returns a newly malloc'd string that caller must free, or NULL on failure.
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+char *base64url_encode(const unsigned char *input, int length) {
+    BIO *b64 = NULL, *bmem = NULL;
+    BUF_MEM *bptr = NULL;
+    char *b64_text = NULL;
+    char *b64url_text = NULL;
+    int i, len;
+
+    if (!input || length <= 0)
+        return NULL;
+
+    // Create BIO chain for Base64 encoding without newlines
+    b64 = BIO_new(BIO_f_base64());
+    if (!b64) return NULL;
+    BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
+
+    bmem = BIO_new(BIO_s_mem());
+    if (!bmem) {
+        BIO_free(b64);
+        return NULL;
+    }
+
+    b64 = BIO_push(b64, bmem);
+
+    if (BIO_write(b64, input, length) <= 0) {
+        BIO_free_all(b64);
+        return NULL;
+    }
+
+    if (BIO_flush(b64) != 1) {
+        BIO_free_all(b64);
+        return NULL;
+    }
+
+    BIO_get_mem_ptr(b64, &bptr);
+    if (!bptr || bptr->length == 0) {
+        BIO_free_all(b64);
+        return NULL;
+    }
+
+    // Allocate buffer for null-terminated string
+    b64_text = malloc(bptr->length + 1);
+    if (!b64_text) {
+        BIO_free_all(b64);
+        return NULL;
+    }
+    memcpy(b64_text, bptr->data, bptr->length);
+    b64_text[bptr->length] = '\0';
+
+    BIO_free_all(b64);
+
+    // Now convert base64 to base64url:
+    // '+' -> '-', '/' -> '_', remove '=' padding
+    len = strlen(b64_text);
+    b64url_text = malloc(len + 1); // base64url won't be longer than base64
+    if (!b64url_text) {
+        free(b64_text);
+        return NULL;
+    }
+
+    for (i = 0; i < len; i++) {
+        if (b64_text[i] == '+')
+            b64url_text[i] = '-';
+        else if (b64_text[i] == '/')
+            b64url_text[i] = '_';
+        else if (b64_text[i] == '=')
+            break; // padding starts here, stop copying
+        else
+            b64url_text[i] = b64_text[i];
+    }
+    b64url_text[i] = '\0';
+
+    free(b64_text);
+    return b64url_text;
+}
+#endif
+
+// Helper function to create EVP_PKEY from EC_KEY using new API
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+static EVP_PKEY *create_evp_pkey_from_ec_key(const EC_KEY *ec_key) {
+    EVP_PKEY *pkey = NULL;
+    OSSL_PARAM params[4];
+    BIGNUM *x = NULL, *y = NULL;
+    unsigned char x_buf[32], y_buf[32]; // For P-256
+    size_t x_len, y_len;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    // Deprecated but necessary extraction for now
+    const EC_GROUP *group = EC_KEY_get0_group(ec_key);
+    const EC_POINT *point = EC_KEY_get0_public_key(ec_key);
+    if (!group || !point) {
+        return NULL;
+    }
+
+    x = BN_new();
+    y = BN_new();
+    if (!x || !y) {
+        BN_free(x);
+        BN_free(y);
+        return NULL;
+    }
+
+    if (EC_POINT_get_affine_coordinates_GFp(group, point, x, y, NULL) != 1) {
+        BN_free(x);
+        BN_free(y);
+        return NULL;
+    }
+#pragma GCC diagnostic pop
+
+    x_len = BN_num_bytes(x);
+    y_len = BN_num_bytes(y);
+    if (x_len > sizeof(x_buf) || y_len > sizeof(y_buf)) {
+        BN_free(x);
+        BN_free(y);
+        return NULL;
+    }
+
+    memset(x_buf, 0, sizeof(x_buf));
+    memset(y_buf, 0, sizeof(y_buf));
+    BN_bn2binpad(x, x_buf, sizeof(x_buf));
+    BN_bn2binpad(y, y_buf, sizeof(y_buf));
+
+    BN_free(x);
+    BN_free(y);
+
+    // Prepare params with correct constants
+    params[0] = OSSL_PARAM_construct_utf8_string(OSSL_PKEY_PARAM_GROUP_NAME, "P-256", 0);
+    params[1] = OSSL_PARAM_construct_octet_string(OSSL_PKEY_PARAM_EC_PUB_X, x_buf, sizeof(x_buf));
+    params[2] = OSSL_PARAM_construct_octet_string(OSSL_PKEY_PARAM_EC_PUB_Y, y_buf, sizeof(y_buf));
+    params[3] = OSSL_PARAM_construct_end();
+
+    EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
+    if (!pctx) {
+        return NULL;
+    }
+
+    if (EVP_PKEY_fromdata_init(pctx) <= 0) {
+        EVP_PKEY_CTX_free(pctx);
+        return NULL;
+    }
+
+    if (EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_PUBLIC_KEY, params) <= 0) {
+        EVP_PKEY_CTX_free(pctx);
+        return NULL;
+    }
+
+    EVP_PKEY_CTX_free(pctx);
+
+    return pkey;
+}
+#endif
+
 stir_shaken_status_t stir_shaken_create_jwk(stir_shaken_context_t *ss, EC_KEY *ec_key, const char *kid, ks_json_t **jwk)
 {
     ks_json_t *j = NULL;
     BIGNUM *x = NULL, *y = NULL;
-    const EC_GROUP *group = NULL;
-    const EC_POINT *point = NULL;
-    char *x_b64 = "";
-    char *y_b64 = "";
+    char *x_b64 = NULL;
+    char *y_b64 = NULL;
 
     if (!ec_key || !jwk) {
-		stir_shaken_set_error(ss, "Bad params", STIR_SHAKEN_ERROR_BAD_PARAMS_22);
-		return STIR_SHAKEN_STATUS_TERM;
-	}
+        stir_shaken_set_error(ss, "Bad params", STIR_SHAKEN_ERROR_BAD_PARAMS_22);
+        return STIR_SHAKEN_STATUS_TERM;
+    }
+
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
+    const EC_GROUP *group = NULL;
+    const EC_POINT *point = NULL;
 
     point = EC_KEY_get0_public_key(ec_key);
     if (!point) {
@@ -2984,16 +3266,86 @@ stir_shaken_status_t stir_shaken_create_jwk(stir_shaken_context_t *ss, EC_KEY *e
         return STIR_SHAKEN_STATUS_ERR;
     }
 
-    if (EC_POINT_get_affine_coordinates_GFp(group, point, x, y, NULL) != 1) {
-        stir_shaken_set_error(ss, "Cannot get affine coordinates from EC key", STIR_SHAKEN_ERROR_SSL_EC_POINT_COORDINATE);
+    x = BN_new();
+    y = BN_new();
+    if (!x || !y) {
+        stir_shaken_set_error(ss, "Cannot allocate BIGNUMs", STIR_SHAKEN_ERROR_SSL_BN_ALLOC);
+        BN_free(x);
+        BN_free(y);
         return STIR_SHAKEN_STATUS_ERR;
     }
 
-    // TODO need to get x and y coordinates in base 64
+    if (EC_POINT_get_affine_coordinates_GFp(group, point, x, y, NULL) != 1) {
+        stir_shaken_set_error(ss, "Cannot get affine coordinates from EC key", STIR_SHAKEN_ERROR_SSL_EC_POINT_COORDINATE);
+        BN_free(x);
+        BN_free(y);
+        return STIR_SHAKEN_STATUS_ERR;
+    }
+#else
+    // OpenSSL 3.0+
+    EVP_PKEY *pkey = create_evp_pkey_from_ec_key(ec_key);
+    if (!pkey) {
+        stir_shaken_set_error(ss, "Cannot create EVP_PKEY from EC_KEY", STIR_SHAKEN_ERROR_SSL_EVP_PKEY_SET1);
+        return STIR_SHAKEN_STATUS_ERR;
+    }
+
+    if (!EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_EC_PUB_X, &x) ||
+        !EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_EC_PUB_Y, &y)) {
+        stir_shaken_set_error(ss, "Cannot get EC pub key coordinates", STIR_SHAKEN_ERROR_SSL_EVP_PKEY_GET_PARAM);
+        EVP_PKEY_free(pkey);
+        BN_free(x);
+        BN_free(y);
+        return STIR_SHAKEN_STATUS_ERR;
+    }
+
+    EVP_PKEY_free(pkey);
+#endif
+
+    // Now convert x and y (BIGNUMs) to base64url encoding
+
+    // Convert BIGNUM x to bytes
+    int x_len = BN_num_bytes(x);
+    unsigned char *x_bin = malloc(x_len);
+    if (!x_bin) {
+        stir_shaken_set_error(ss, "Memory allocation failed for x_bin", STIR_SHAKEN_ERROR_MEMORY);
+        BN_free(x);
+        BN_free(y);
+        return STIR_SHAKEN_STATUS_ERR;
+    }
+    BN_bn2bin(x, x_bin);
+
+    // Convert BIGNUM y to bytes
+    int y_len = BN_num_bytes(y);
+    unsigned char *y_bin = malloc(y_len);
+    if (!y_bin) {
+        stir_shaken_set_error(ss, "Memory allocation failed for y_bin", STIR_SHAKEN_ERROR_MEMORY);
+        free(x_bin);
+        BN_free(x);
+        BN_free(y);
+        return STIR_SHAKEN_STATUS_ERR;
+    }
+    BN_bn2bin(y, y_bin);
+
+    x_b64 = base64url_encode(x_bin, x_len);
+    y_b64 = base64url_encode(y_bin, y_len);
+
+    free(x_bin);
+    free(y_bin);
+    BN_free(x);
+    BN_free(y);
+
+    if (!x_b64 || !y_b64) {
+        stir_shaken_set_error(ss, "Base64url encoding failed", STIR_SHAKEN_ERROR_BASE64);
+        free(x_b64);
+        free(y_b64);
+        return STIR_SHAKEN_STATUS_ERR;
+    }
 
     j = ks_json_create_object();
     if (!j) {
         stir_shaken_set_error(ss, "Error in ks_json, cannot create object", STIR_SHAKEN_ERROR_KSJSON_CREATE_OBJECT_JSON_1);
+        free(x_b64);
+        free(y_b64);
         return STIR_SHAKEN_STATUS_ERR;
     }
 
@@ -3002,11 +3354,13 @@ stir_shaken_status_t stir_shaken_create_jwk(stir_shaken_context_t *ss, EC_KEY *e
     ks_json_add_string_to_object(j, "x", x_b64);
     ks_json_add_string_to_object(j, "y", y_b64);
     if (kid) {
-        ks_json_add_string_to_object(j, "kid", kid); // kid should be something like "sp.com Reg Public key 123XYZ"
+        ks_json_add_string_to_object(j, "kid", kid);
     }
 
-    *jwk = j;
+    free(x_b64);
+    free(y_b64);
 
+    *jwk = j;
     return STIR_SHAKEN_STATUS_OK;
 }
 
